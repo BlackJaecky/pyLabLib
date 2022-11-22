@@ -6,10 +6,10 @@ from ...core.utils import funcargparse, general
 import collections
 
 
-class TektronixError(comm_backend.DeviceError):
-    """Generic Tektronix devices error"""
-class TektronixBackendError(TektronixError,comm_backend.DeviceBackendError):
-    """Generic Tektronix backend communication error"""
+class AgilentError(comm_backend.DeviceError):
+    """Generic Agilent devices error"""
+class AgilentBackendError(AgilentError,comm_backend.DeviceBackendError):
+    """Generic Agilent backend communication error"""
 
 def muxchannel(*args, **kwargs):
     """Multiplex the function over its channel argument"""
@@ -19,37 +19,37 @@ def muxchannel(*args, **kwargs):
         return list(self._main_channels_idx)
     return general.muxcall("channel",special_args={"all":ch_func},mux_argnames=kwargs.get("mux_argnames",None),return_kind=kwargs.get("return_kind","list"),allow_partial=True)
 TTriggerParameters=collections.namedtuple("TTriggerParameters",["source","level","coupling","slope"])
-class ITektronixScope(SCPI.SCPIDevice):
+class IAgilentScope(SCPI.SCPIDevice):
     """
-    Generic Tektronix oscilloscope.
+    Generic Agilent oscilloscope.
     
     Args:
         addr: device address; usually a VISA address string such as ``"USB0::0x0699::0x0364::C000000::INSTR"``
         nchannels: can specify number of channels on the oscilloscope; by default, autodetect number of channels (might take several seconds on connection)
     """
-    _wfmpre_comm="WFMP"  # command used to obtain waveform preamble
-    _trig_comm="TRIGGER:MAIN"  # command used to set up trigger
+    _wfmpre_comm="WAV:PRE"  # command used to obtain waveform preamble
+    _trig_comm="TRIG"  # command used to set up trigger
     _software_trigger_delay=0.3 # delay between issuing a single acquisition and sending the software trigger; if the trigger is sent sooner, it is ignored
-    _probe_attenuation_comm=("PROBE","att")
+    _probe_attenuation_comm=("PROB","att")
     # _default_operation_cooldown={"write":2E-3}
     _main_channels_idx="specify"  # ids of main channels (integers); "specify" means the number is specified in constructor; specified "auto" means that they get autodetected on connection
-    _aux_channels=[]  # names of aux channels (strings)
+    _aux_channels=['ext', 'line', 'wgen']  # names of aux channels (strings)
     # horizontal offset method; either ``"delay"`` (use ``"HORizontal:DELay:TIMe"``), ``"pos"`` (use ``"HORizontal:POSition"``, and set ``"HORizontal:DELay:MODe"`` accordingly),
     # or ``"pos_only"`` (use ``"HORizontal:POSition"``, don't set ``"HORizontal:DELay:MODe"`` in case it's not available)
     _hor_offset_method="pos_only"
     _hor_pos_mode="real_center"  # mode of :HORIZONTAL:POS command; can be "real_center", if time position of the sample is specified (0 is centered), or "frac" if fraction to the left is specified (50 is centered)
     _default_backend_timeout=10.
-    Error=TektronixError
-    ReraiseError=TektronixBackendError
+    Error=AgilentError
+    ReraiseError=AgilentBackendError
     def __init__(self, addr, nchannels="auto"):
         SCPI.SCPIDevice.__init__(self,addr)
         if self._main_channels_idx=="specify":
             if nchannels=="auto":
                 nchannels=self._detect_main_channels_number()
             self._main_channels_idx=list(range(1,nchannels+1))
-        self._main_channels=[(i,"ch{}".format(i)) for i in self._main_channels_idx]
-        self._add_parameter_class(interface.EnumParameterClass("input_channel",self._main_channels,value_case="upper"))
-        self._add_parameter_class(interface.EnumParameterClass("channel",self._main_channels+self._aux_channels,value_case="upper"))
+        self._main_channels=[(i,"chan{}".format(i)) for i in self._main_channels_idx]
+        self._add_parameter_class(interface.EnumParameterClass("input_channel",self._main_channels,value_case="upper",match_prefix=True))
+        self._add_parameter_class(interface.EnumParameterClass("channel",self._main_channels+self._aux_channels,value_case="upper",match_prefix=True))
         self.default_data_fmt="<i1"
         self._add_info_variable("channels_number",self.get_channels_number)
         self._add_info_variable("channels",self.get_channels)
@@ -68,7 +68,7 @@ class ITektronixScope(SCPI.SCPIDevice):
     def _detect_main_channels_number(self):
         ch=1
         while ch<=16:
-            if self._is_command_valid(":CH{}:POSITION?".format(ch+1)):
+            if self._is_command_valid(":CHAN{}:BWL?".format(ch+1)):
                 ch+=1
             else:
                 break
@@ -78,7 +78,7 @@ class ITektronixScope(SCPI.SCPIDevice):
         return len(self._main_channels_idx)
     def get_channels(self, only_main=False):
         """Get the list of all input channels (if ``only_main==True``) or all available channels (if ``only_main==False``)"""
-        channels=["CH{}".format(i) for i in self._main_channels_idx]
+        channels=["CHAN{}".format(i) for i in self._main_channels_idx]
         return channels if only_main else channels+self._aux_channels
     @interface.use_parameters
     def normalize_channel_name(self, channel):
@@ -91,8 +91,7 @@ class ITektronixScope(SCPI.SCPIDevice):
         If ``wait==True``, wait until the acquisition is complete; otherwise, return immediately.
         if ``software_trigger==True``, send the software trigger after setup (i.e., the device triggers immediately regardless of the input).
         """
-        self.write(":ACQ:STOPAFTER SEQ")
-        self.write(":ACQ:STATE ON")
+        self.write(":SING") #Starts single acquisition
         if software_trigger:
             self.sleep(self._software_trigger_delay)
             self.force_trigger()
@@ -103,22 +102,24 @@ class ITektronixScope(SCPI.SCPIDevice):
         self.wait_sync(timeout=timeout)
     def grab_continuous(self, enable=True):
         """Start or stop continuous grabbing"""
-        self.write(":ACQ:STOPAFTER RUNSTOP")
-        self.write(":ACQ:STATE",enable)
+        if enable:
+            self.write(":RUN")
+        else:
+            self.write(":STOP")
     def stop_grabbing(self):
         """Stop grabbing or waiting (equivalent to ``self.grab_continuous(False)``)"""
         self.grab_continuous(enable=False)
     def is_continuous(self):
         """Check if grabbing is continuous or single"""
-        return self.ask(":ACQ:STOPAFTER?").strip().upper().startswith("RUN")
+        return self.ask("::RSTate?").strip().upper().startswith("RUN")
     def is_grabbing(self):
         """
         Check if acquisition is in progress.
 
-        Return ``True`` if the oscilloscope is recording data, or if the trigger is armed/ready and waiting; return ``False`` if the acquisition is stopped.
+        Return count from 0 to 99 if the oscilloscope is recording data, or if the trigger is armed/ready and waiting; return 100 if the acquisition is stopped.
         To check if the trigger has been triggered, use :meth:`get_trigger_state`.
         """
-        return self.ask(":ACQ:STATE?","bool")
+        return self.ask(":ACQ:COMP?")!="100"
     
     # TODO: set trigger kind (edge, etc.)
     @interface.use_parameters(_returns="channel")
@@ -128,7 +129,7 @@ class ITektronixScope(SCPI.SCPIDevice):
 
         Can be an integer indicating channel number or a name of a special channel.
         """
-        return self.ask(self._trig_comm+":EDGE:SOURCE?")
+        return self.ask(self._trig_comm+":EDGE:SOUR?")
     @interface.use_parameters
     def set_edge_trigger_source(self, channel):
         """
@@ -138,25 +139,25 @@ class ITektronixScope(SCPI.SCPIDevice):
         """
         self.write(self._trig_comm+":EDGE:SOURCE",channel)
         return self.get_edge_trigger_source()
-    _p_coupling=interface.EnumParameterClass("coupling",["ac","dc","gnd"],value_case="upper")
-    _p_trigger_coupling=interface.EnumParameterClass("trigger_coupling",["ac","dc"],value_case="upper")
-    _p_slope=interface.EnumParameterClass("slope",["rise",("rise","ris"),"fall"],value_case="upper",match_prefix=True)
+    _p_coupling=interface.EnumParameterClass("coupling",["ac","dc"],value_case="upper")
+    _p_trigger_coupling=interface.EnumParameterClass("trigger_coupling",["ac","dc","lfr"],value_case="upper",match_prefix=True)
+    _p_slope=interface.EnumParameterClass("slope",["neg","pos","eith","alt"],value_case="upper",match_prefix=True)
     @interface.use_parameters(_returns="trigger_coupling")
     def get_edge_trigger_coupling(self):
-        """Get edge trigger coupling (``"ac"`` or ``"dc"``)"""
+        """Get edge trigger coupling (``"ac"``, ``"dc"`` or ``"lfr"``)"""
         return self.ask(self._trig_comm+":EDGE:COUPL?")
     @interface.use_parameters(coupling="trigger_coupling")
     def set_edge_trigger_coupling(self, coupling):
-        """Set edge trigger coupling (``"ac"`` or ``"dc"``)"""
+        """Set edge trigger coupling (``"ac"``, ``"dc"`` or ``"lfr"``)"""
         self.write(self._trig_comm+":EDGE:COUPL",coupling)
         return self.get_edge_trigger_coupling()
     @interface.use_parameters(_returns="slope")
     def get_edge_trigger_slope(self):
-        """Get edge trigger slope (``"fall"`` or ``"rise"``)"""
+        """Get edge trigger slope (``"neg"``, ``"pos"``, ``"eith"`` or ``"alt"``)"""
         return self.ask(self._trig_comm+":EDGE:SLOPE?")
     @interface.use_parameters
     def set_edge_trigger_slope(self, slope):
-        """Set edge trigger slope (``"fall"`` or ``"rise"``)"""
+        """Set edge trigger slope ``"neg"``, ``"pos"``, ``"eith"`` or ``"alt"``)"""
         self.write(self._trig_comm+":EDGE:SLOPE",slope)
         return self.get_edge_trigger_slope()
     def get_trigger_level(self):
@@ -169,7 +170,7 @@ class ITektronixScope(SCPI.SCPIDevice):
     def _get_edge_trigger_params(self):
         return TTriggerParameters(self.get_edge_trigger_source(), self.get_trigger_level(), self.get_edge_trigger_coupling(), self.get_edge_trigger_slope())
     @interface.use_parameters(source="channel")
-    def setup_edge_trigger(self, source, level, coupling="dc", slope="rise"):
+    def setup_edge_trigger(self, source, level, coupling="dc", slope="pos"):
         """
         Setup edge trigger.
 
@@ -179,17 +180,17 @@ class ITektronixScope(SCPI.SCPIDevice):
         self.write(self._trig_comm+":EDGE:COUPL",coupling)
         self.write(self._trig_comm+":EDGE:SLOPE",slope)
         self.write(self._trig_comm+":LEVEL",level)
-        self.write(self._trig_comm+":TYPE","EDGE")
+        self.write(self._trig_comm+":MODE","EDGE")
         return self._get_edge_trigger_params()
-    _p_trigger_mode=interface.EnumParameterClass("trigger_mode",["auto","norm"],value_case="upper",match_prefix=True)
-    @interface.use_parameters(_returns="trigger_mode")
+    _p_trigger_mode=interface.EnumParameterClass("trigger_sweep",["auto","norm"],value_case="upper",match_prefix=True)
+    @interface.use_parameters(_returns="trigger_sweep")
     def get_trigger_mode(self):
         """
-        Get trigger mode.
+        Get trigger sweep.
 
         Can be either ``"auto"`` or ``"norm"``.
         """
-        return self.ask(self._trig_comm+":MODE?")
+        return self.ask(self._trig_comm+":SWE?")
     @interface.use_parameters
     def set_trigger_mode(self, trigger_mode="auto"):
         """
@@ -197,30 +198,30 @@ class ITektronixScope(SCPI.SCPIDevice):
 
         Can be either ``"auto"`` or ``"norm"``.
         """
-        self.write(self._trig_comm+":MODE",trigger_mode)
+        self.write(self._trig_comm+":SWE",trigger_mode)
         return self.get_trigger_mode()
     
-    _p_trigger_state=interface.EnumParameterClass("trigger_state",[("armed","arm"),"ready",("trigger","trig"),"auto",("save","sav"),"scan"],value_case="upper",match_prefix=True)
-    @interface.use_parameters(_returns="trigger_state")
-    def get_trigger_state(self):
-        """
-        Get trigger state.
+    # _p_trigger_state=interface.EnumParameterClass("trigger_state",[("armed","arm"),"ready",("trigger","trig"),"auto",("save","sav"),"scan"],value_case="upper",match_prefix=True)
+    # @interface.use_parameters(_returns="trigger_state")
+    # def get_trigger_state(self):
+    #     """
+    #     Get trigger state.
 
-        Can be ``"armed"`` (acquiring pretrigger), ``"ready"`` (pretrigger acquired, wait for trigger event), ``"trigger"`` (triggered, acquiring the rest of the waveform),
-        ``"auto"`` (``"auto"`` mode trigger is acquiring data in the absence of trigger), ``"save"`` (acquisition is stopped), or ``"scan"`` (oscilloscope in the scan mode)
-        """
-        return self.ask("TRIGGER:STATE?")
+    #     Can be ``"armed"`` (acquiring pretrigger), ``"ready"`` (pretrigger acquired, wait for trigger event), ``"trigger"`` (triggered, acquiring the rest of the waveform),
+    #     ``"auto"`` (``"auto"`` mode trigger is acquiring data in the absence of trigger), ``"save"`` (acquisition is stopped), or ``"scan"`` (oscilloscope in the scan mode)
+    #     """
+    #     return self.ask("TRIGGER:STATE?")
     def force_trigger(self):
         """Force trigger event"""
-        self.write("TRIGGER FORCE")
+        self.write(":TRIG:FORC")
 
 
     def get_horizontal_span(self):
         """Get horizontal span (in seconds)"""
-        return self.ask(":HORIZONTAL:SCALE?","float")*10. # scale is per division (10 division per screen)
+        return self.ask(":TIM:SCAL?","float")*10. # scale is per division (10 division per screen)
     def set_horizontal_span(self, span):
         """Set horizontal span (in seconds)"""
-        self.write(":HORIZONTAL:SCALE",span/10.,"float") # scale is per division (10 division per screen)
+        self.write("TIM:SCAL",span/10.,"float") # scale is per division (10 division per screen)
         return self.get_horizontal_span()
     def _to_horizontal_pos(self, center_time):
         if self._hor_pos_mode=="real_center":
@@ -236,46 +237,36 @@ class ITektronixScope(SCPI.SCPIDevice):
         return (hor_pos/100.-.5)*span
     def get_horizontal_offset(self):
         """Get horizontal offset (position of the center of the sweep; in seconds)"""
-        if self._hor_offset_method=="delay":
-            self.write(":HORIZONTAL:DELAY:MODE 1")
-            return self.ask(":HORIZONTAL:DELAY:TIME?","float")
-        else:
-            if self._hor_offset_method=="pos":
-                self.write(":HORIZONTAL:DELAY:MODE 0")
-            return self._from_horizontal_pos(self.ask(":HORIZONTAL:POS?","float"))
+        return self._from_horizontal_pos(self.ask(":TIM:POS?","float"))
+    # TODO Handle timebase reference position. At the moment center is expected.
+    #_p_timebase_reference=interface.EnumParameterClass("timebase_reference",["left",("center","cent"),("right","right")],value_case="upper",match_prefix=True)
+    #@interface.use_parameters(reference="timebase_reference")
     def set_horizontal_offset(self, offset=0.):
         """Set horizontal offset (position of the center of the sweep; in seconds)"""
-        if self._hor_offset_method=="delay":
-            self.write(":HORIZONTAL:DELAY:MODE 1")
-            self.write(":HORIZONTAL:DELAY:TIME",offset,"float")
-        else:
-            if self._hor_offset_method=="pos":
-                self.write(":HORIZONTAL:DELAY:MODE 0")
-            pos=self._to_horizontal_pos(offset)
-            self.write(":HORIZONTAL:POS",pos,"float")
+        #self.write(":TIM:REF", reference)
+        self.write(":TIM:POS", self._to_horizontal_pos(offset),"float")
         return self.get_horizontal_offset()
     @muxchannel
     @interface.use_parameters(channel="input_channel")
     def get_vertical_span(self, channel):
         """Get channel vertical span (in V)"""
-        return self.ask(":{}:SCALE?".format(channel),"float")*10. # scale is per division (10 division per screen)
+        return self.ask(":{}:SCAL?".format(channel),"float")*10. # scale is per division (10 division per screen)
     @muxchannel(mux_argnames="span")
     @interface.use_parameters(channel="input_channel")
     def set_vertical_span(self, channel, span):
         """Set channel vertical span (in V)"""
-        self.write(":{}:SCALE".format(channel),span/10.,"float") # scale is per division (10 division per screen)
+        self.write(":{}:SCAL".format(channel),span/10.,"float") # scale is per division (10 division per screen)
         return self._wip.get_vertical_span(channel)
     @muxchannel
     @interface.use_parameters(channel="input_channel")
     def get_vertical_position(self, channel):
         """Get channel vertical position (offset of the zero volt line; in V)"""
-        return self.ask(":{}:POSITION?".format(channel),"float")*self._wip.get_vertical_span(channel)/10. # offset is in divisions (10 division per screen)
+        return self.ask(":{}::OFFS?".format(channel),"float") # offset is in divisions (10 division per screen)
     @muxchannel(mux_argnames="position")
     @interface.use_parameters(channel="input_channel")
     def set_vertical_position(self, channel, position):
         """Set channel vertical position (offset of the zero volt line; in V)"""
-        position/=self._wip.get_vertical_span(channel)/10. # position is in divisions (10 division per screen)
-        self.write(":{}:POSITION".format(channel),position,"float")
+        self.write(":{}::OFFS".format(channel),position,"float")
         return self._wip.get_vertical_position(channel)
     
 
@@ -283,12 +274,12 @@ class ITektronixScope(SCPI.SCPIDevice):
     @interface.use_parameters(channel="input_channel")
     def is_channel_enabled(self, channel):
         """Check if channel is enabled"""
-        return self.ask(":SELECT:{}?".format(channel),"bool")
+        return self.ask(":{}:DISP?".format(channel),"bool")
     @muxchannel(mux_argnames="enabled")
     @interface.use_parameters(channel="input_channel")
     def enable_channel(self, channel, enabled=True):
         """Enable or disable given channel"""
-        self.write(":SELECT:{}".format(channel),enabled,"bool")
+        self.write(":{}:DISP".format(channel),enabled,"bool")
         return self._wip.is_channel_enabled(channel)
     @interface.use_parameters(_returns="input_channel")
     def get_selected_channel(self):
@@ -297,7 +288,7 @@ class ITektronixScope(SCPI.SCPIDevice):
 
         Return number if it is a real channel, or a string name otherwise.
         """
-        return self.ask(":DATA:SOURCE?").strip()
+        return self.ask(":WAV:SOUR?").strip()
     @interface.use_parameters(channel="input_channel")
     def select_channel(self, channel):
         """
@@ -305,7 +296,7 @@ class ITektronixScope(SCPI.SCPIDevice):
 
         Doesn't need to be called explicitly, if :meth:`read_multiple_sweeps` or :meth:`read_sweep` are used.
         """
-        self.write(":DATA:SOURCE {}".format(channel))
+        self.write(":WAV:SOUR {}".format(channel))
         return self.get_selected_channel()
     def _normalize_channel(self, channel):
         return self._parameters["channel"](channel)
@@ -324,18 +315,18 @@ class ITektronixScope(SCPI.SCPIDevice):
         """
         Get channel coupling.
 
-        Can be ``"ac"``, ``"dc"``, or ``"gnd"``.
+        Can be ``"ac"`` or ``"dc"``.
         """
-        return self.ask(":{}:COUPL?".format(channel))
+        return self.ask(":{}:COUP?".format(channel))
     @muxchannel(mux_argnames="coupling")
     @interface.use_parameters(channel="input_channel")
     def set_coupling(self, channel, coupling="dc"):
         """
         Set channel coupling.
 
-        Can be ``"ac"``, ``"dc"``, or ``"gnd"``.
+        Can be ``"ac"`` or ``"dc"``.
         """
-        self.write(":{}:COUPL".format(channel),coupling)
+        self.write(":{}:COUP".format(channel),coupling)
         return self._wip.get_coupling(channel)
     @muxchannel
     @interface.use_parameters(channel="input_channel")
@@ -355,7 +346,7 @@ class ITektronixScope(SCPI.SCPIDevice):
             self.write(":{}:{}".format(channel,comm),attenuation if kind=="att" else 1./attenuation)
         return self._wip.get_probe_attenuation(channel)
 
-    
+    # TODO
     def get_points_number(self, kind="send"):
         """
         Get number of datapoints in various context.
@@ -530,7 +521,7 @@ class ITektronixScope(SCPI.SCPIDevice):
             data=self.read_binary_array_data(timeout=timeout)
         trace=self.parse_array_data(data,wfmpre["fmt"].to_desc())
         if len(trace)!=wfmpre["pts"]:
-            raise TektronixError("received data length {0} is not equal to the number of points {1}".format(len(trace),wfmpre["pts"]))
+            raise AgilentError("received data length {0} is not equal to the number of points {1}".format(len(trace),wfmpre["pts"]))
         return self._scale_data(trace,wfmpre)
     def read_multiple_sweeps(self, channels, wfmpres=None, ensure_fmt=False, timeout=None, return_wfmpres=None):
         """
@@ -580,18 +571,18 @@ class ITektronixScope(SCPI.SCPIDevice):
 
 
 
-class TDS2000(ITektronixScope):
+class TDS2000(IAgilentScope):
     """
-    Tektronix TDS2000 series oscilloscope.
+    Agilent TDS2000 series oscilloscope.
 
     Args:
         addr: device address; usually a VISA address string such as ``"USB0::0x0699::0x0364::C000000::INSTR"``
         nchannels: can specify number of channels on the oscilloscope; by default, autodetect number of channels (might take several seconds on connection)
     """
 
-class DPO2000(ITektronixScope):
+class DPO2000(IAgilentScope):
     """
-    Tektronix DPO2000 series oscilloscope.
+    Agilent DPO2000 series oscilloscope.
 
     Args:
         addr: device address; usually a VISA address string such as ``"USB0::0x0699::0x0364::C000000::INSTR"``
