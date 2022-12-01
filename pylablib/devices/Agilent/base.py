@@ -347,7 +347,7 @@ class IAgilentScope(SCPI.SCPIDevice):
         return self._wip.get_probe_attenuation(channel)
 
     # TODO
-    def get_points_number(self, kind="send"):
+    def get_points_number(self, kind="acq"):
         """
         Get number of datapoints in various context.
 
@@ -360,14 +360,18 @@ class IAgilentScope(SCPI.SCPIDevice):
         For length of read-out trace, see also :meth:`get_data_pts_range`.
         """
         funcargparse.check_parameter_range(kind,"kind",{"acq","trace","send"})
-        if kind=="acq":
-            return self.ask(":HORIZONTAL:RECORDLENGTH?","int")
-        elif kind=="trace":
-            return self.ask(":{}:RECORDLENGTH?".format(self._wfmpre_comm),"int")
-        else:
-            return self.ask(":{}:NR_PT?".format(self._wfmpre_comm),"int")
+        # if kind=="acq":
+        return self.ask(":WAV:POIN?","int")
+        # elif kind=="trace":
+        #     return self.ask(":{}:RECORDLENGTH?".format(self._wfmpre_comm),"int")
+        # else:
+        #     return self.ask(":{}:NR_PT?".format(self._wfmpre_comm),"int")
+    _p_points_mode=interface.EnumParameterClass("points_mode",[("NORMal","NORM"),("MAXimum","MAX"),"raw"],value_case="upper",match_prefix=True)
+    @interface.use_parameters(resolution="points_mode")
     def _set_data_resolution(self, resolution):
         """Implemented in specific oscilloscope classes"""
+        self.write(":WAV:POIN:MODE",resolution)
+        return self.ask(":WAV:POIN:MODE?")
     def set_points_number(self, pts_num, reset_limits=True):
         """
         Set number of datapoints to record when acquiring a trace.
@@ -375,13 +379,13 @@ class IAgilentScope(SCPI.SCPIDevice):
         If ``reset_limits==True``, reset the datapoints range (:meth:`set_data_pts_range`) to the full range.
         The actual set value (returned by this method) can be different from the requested value.
         """
-        if pts_num<5E4:
-            self._set_data_resolution("REDUCED")
+        if pts_num<=1E3:
+            self._set_data_resolution("NORM")
         else:
-            self._set_data_resolution("FULL")
-        self.write(":HORIZONTAL:RECORDLENGTH",pts_num,"int")
-        if reset_limits:
-            self.set_data_pts_range()
+            self._set_data_resolution("MAX")
+        self.write(":WAV:POIN",pts_num,"int")
+        # if reset_limits:
+        #     self.set_data_pts_range()
         return self.get_points_number(kind="send")
     def get_data_pts_range(self):
         """
@@ -389,7 +393,7 @@ class IAgilentScope(SCPI.SCPIDevice):
 
         The range is defined from 1 to the points number (returned by :meth:`get_points_number`).
         """
-        return self.ask(":DATA:START?","int"),min(self.ask(":DATA:STOP?","int"),self.get_points_number())
+        return 1,self.get_points_number()
     def set_data_pts_range(self, rng=None):
         """
         Set range of data points to read.
@@ -401,8 +405,7 @@ class IAgilentScope(SCPI.SCPIDevice):
             start,stop=1,self.get_points_number(kind="acq")
         else:
             start,stop=min(rng),max(rng)
-        self.write(":DATA:START",start,"int")
-        self.write(":DATA:STOP",stop,"int")
+        self.set_points_number(pts_num=stop)
         return self.get_data_pts_range()
     
     def set_data_format(self, fmt="default"):
@@ -416,51 +419,66 @@ class IAgilentScope(SCPI.SCPIDevice):
             fmt=self.default_data_fmt
         fmt=data_format.DataFormat.from_desc(fmt)
         if fmt.is_ascii():
-            self.write(":DATA:ENCDG ASCII")
+            self.write(":WAV:FORM ASCII")
         else:
             if (fmt.kind not in "iu") or (fmt.size not in {1,2}):
                 raise ValueError("format {0} isn't supported".format(fmt))
-            if fmt.kind=="i":
-                dfmt="RIBINARY"
+            if fmt.kind=="u":
+                self.write(":WAV:UNS", True, "bool")
             else:
-                dfmt="RPBINARY"
-            if fmt.byteorder==">":
-                dfmt="S"+dfmt
-            self.write(":DATA:ENCDG",dfmt)
-            self.write(":DATA:WIDTH",fmt.size)
+                self.write(":WAV:UNS", False, "bool")
+            if fmt.size=="1":
+                self.write(":WAV:FORM BYTE")
+            else:
+                self.write(":WAV:FORM WORD")
+                if fmt.byteorder==">":
+                    self.write(":WAV:BYT LSBF")
+                else:
+                    self.write(":WAV:BYT MSBF")
         return self.get_data_format()
-    def _build_data_format(self, dfmt, size):
-        if dfmt.startswith("ASC"):
-            return data_format.DataFormat(None,"ascii",None)
-        if dfmt[0]=="S":
-            border=">"
-            dfmt=dfmt[1:]
-        else:
-            border="<"
-        kind="i" if dfmt[1]=="I" else "u"
-        return data_format.DataFormat(size,kind,border)
-    def get_data_format(self):
+
+    def get_data_format(self, form=None):
         """
         Get data transfer format.
 
         Return a string describing the format; can be either ``"ascii"``, or a numpy-style format string (e.g., ``"<u2"``).
         """
-        dfmt=self.ask(":DATA:ENCDG?").upper()
-        size=self.ask(":DATA:WIDTH?","int")
-        return self._build_data_format(dfmt,size).to_desc()
+        size=1
+        if form is None or form=='':
+            form=self.ask(":WAV:FORM?").upper()
+        
+        if form.startswith("ASC"):
+            return data_format.DataFormat(None,"ascii",None)
+        elif form.startswith("WORD"):
+            size=2
+                    
+        kind="u" if self.ask("WAV:UNS?","bool") else "i"
+        border=self.ask(":WAV:BYT?").upper()
+        if border=="LSBF":
+            border=">"
+        else:
+            border="<"
+        
+        
+        return data_format.DataFormat(size,kind,border)
 
     def _build_wfmpre(self, data):
-        if len(data)<15:
+        if len(data)<10:
             raise self.Error("incomplete preamble: {}".format(data))
         wfmpre={}
-        wfmpre["fmt"]=data_format.DataFormat.from_desc("ascii") if data[2].startswith("ASC") else self._build_data_format(data[3],data[0])
-        wfmpre["pts"]=int(data[5])
-        wfmpre["xzero"]=float(data[10])
-        wfmpre["xincr"]=float(data[8])
-        wfmpre["ptoff"]=int(data[9])
-        wfmpre["ymult"]=float(data[12])
-        wfmpre["yzero"]=float(data[13])
-        wfmpre["yoff"]=float(data[14])
+        wfmpre["fmt"]=('BYTE','WORD','','ASCII')
+        wfmpre["fmt"]=self.get_data_format(form=wfmpre["fmt"][int(data[0])])
+        wfmpre["type"]=('NORM','PEAK','AVER','HRES')
+        wfmpre["type"]=wfmpre["type"][int(data[1])]
+        wfmpre["pts"]=int(data[2])
+        wfmpre["count"]=int(data[3]) 
+        wfmpre["xzero"]=float(data[5])
+        wfmpre["xincr"]=float(data[4])
+        wfmpre["ptoff"]=int(data[6])
+        wfmpre["ymult"]=float(data[7])
+        wfmpre["yzero"]=float(data[8])
+        wfmpre["yoff"]=float(data[9])
+       
         return wfmpre
     def get_wfmpre(self, channel=None, enable=True):
         """
@@ -478,7 +496,7 @@ class IAgilentScope(SCPI.SCPIDevice):
             if not self.is_channel_enabled(channel):
                 self.enable_channel(channel)
         data=self.ask(":{}?".format(self._wfmpre_comm)).split(";")
-        data=[d.strip().upper() for d in data]
+        # data=[d.strip().upper() for d in data]
         return self._build_wfmpre(data)
     
     def read_raw_data(self, channel=None, fmt=None, timeout=None):
@@ -497,29 +515,37 @@ class IAgilentScope(SCPI.SCPIDevice):
         else:
             fmt=self.set_data_format(fmt)
         self._change_channel(channel)
-        self.write(":CURVE?")
+        self.write("WAV:DATA?")
         fmt=data_format.DataFormat.from_desc(fmt)
         if fmt.is_ascii():
             data=self.read("raw",timeout=timeout)
+            header=True
         else:
             data=self.read_binary_array_data(timeout=timeout)
-        return self.parse_array_data(data,fmt)
+            header=False
+        return self.parse_array_data(data,fmt,include_header=header)
     def _scale_data(self, data, wfmpre=None):
         wfmpre=wfmpre or self.get_wfmpre()
         xpts=(np.arange(len(data))-wfmpre["ptoff"])*wfmpre["xincr"]+wfmpre["xzero"]
-        ypts=(data-wfmpre["yoff"])*wfmpre["ymult"]+wfmpre["yzero"]
+        fmt=data_format.DataFormat.from_desc(wfmpre["fmt"])
+        if fmt.is_ascii():
+            ypts=[float(x) for x in data]
+        else:
+            ypts=(data-wfmpre["yoff"])*wfmpre["ymult"]+wfmpre["yzero"]
         return np.column_stack((xpts,ypts))
     
     @interface.use_parameters(channel="input_channel")
     def _read_sweep_fast(self, channel, wfmpre=None, timeout=None):
-        self.write(":DATA:SOURCE {}".format(channel))
+        self.write(":WAV:SOUR {}".format(channel))
         wfmpre=wfmpre or self.get_wfmpre(enable=False)
-        self.write(":CURVE?")
+        self.write("WAV:DATA?")
         if wfmpre["fmt"].is_ascii():
             data=self.read("raw",timeout=timeout)
+            header=True
         else:
             data=self.read_binary_array_data(timeout=timeout)
-        trace=self.parse_array_data(data,wfmpre["fmt"].to_desc())
+            header=False
+        trace=self.parse_array_data(data,wfmpre["fmt"].to_desc(),include_header=header)
         if len(trace)!=wfmpre["pts"]:
             raise AgilentError("received data length {0} is not equal to the number of points {1}".format(len(trace),wfmpre["pts"]))
         return self._scale_data(trace,wfmpre)
@@ -571,38 +597,29 @@ class IAgilentScope(SCPI.SCPIDevice):
 
 
 
-class TDS2000(IAgilentScope):
+class DSO2000(IAgilentScope):
     """
-    Agilent TDS2000 series oscilloscope.
+    Agilent DSO2000 series oscilloscope:
+    Bandwidth   4 analog:       2 analog:
+    70 MHz      DSO-X 2004A     DSO-X 2002A
+    100 MHz     DSO-X 2014A     DSO-X 2012A
+    200 MHz     DSO-X 2024A     DSO-X 2022A
 
     Args:
         addr: device address; usually a VISA address string such as ``"USB0::0x0699::0x0364::C000000::INSTR"``
         nchannels: can specify number of channels on the oscilloscope; by default, autodetect number of channels (might take several seconds on connection)
     """
 
-class DPO2000(IAgilentScope):
+class MSO2000(IAgilentScope):
     """
-    Agilent DPO2000 series oscilloscope.
+    Agilent MSO2000 series oscilloscope with 8 digital channels and:
+    Bandwidth   4 analog:       2 analog:
+    70 MHz      MSO-X 2004A     MSO-X 2002A
+    100 MHz     MSO-X 2014A     MSO-X 2012A
+    200 MHz     MSO-X 2024A     MSO-X 2022A
 
     Args:
         addr: device address; usually a VISA address string such as ``"USB0::0x0699::0x0364::C000000::INSTR"``
         nchannels: can specify number of channels on the oscilloscope; by default, autodetect number of channels (might take several seconds on connection)
     """
-    _wfmpre_comm="WFMO"
-    _trig_comm="TRIGGER:A"
-    _probe_attenuation_comm=("PROBE:GAIN","gain")
-    _hor_offset_method="delay"
-    _hor_pos_mode="frac"
-    def _build_wfmpre(self, data):
-        wfmpre={}
-        wfmpre["fmt"]=data_format.DataFormat.from_desc("ascii") if data[2].startswith("ASC") else self._build_data_format(data[3],data[0])
-        wfmpre["pts"]=int(data[6])
-        wfmpre["xzero"]=float(data[10])
-        wfmpre["xincr"]=float(data[9])
-        wfmpre["ptoff"]=int(data[11])
-        wfmpre["ymult"]=float(data[13])
-        wfmpre["yzero"]=float(data[15])
-        wfmpre["yoff"]=float(data[14])
-        return wfmpre
-    def _set_data_resolution(self, resolution):
-        self.write(":DATA:RESOLUTION",resolution)
+    # TODO add stuff for digital channels
